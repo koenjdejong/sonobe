@@ -1,5 +1,4 @@
 /target
-Cargo.lock
 
 # Circom generated files
 experimental-frontends/src/circom/test_folder/*_js/
