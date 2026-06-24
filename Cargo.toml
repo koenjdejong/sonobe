@@ -3,7 +3,8 @@ members = [
     "folding-schemes",
     "solidity-verifiers",
     "cli",
-    "experimental-frontends"
+    "experimental-frontends",
+    "zk-data-quality"
 ]
 resolver = "2"
 
