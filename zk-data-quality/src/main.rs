@@ -14,13 +14,13 @@ mod gadgets;
 mod orders;
 mod step_circuit;
 
-use ark_bn254::{Bn254, Fr, G1Projective as Projective};
+use ark_bn254::{Fr, G1Projective as Projective};
 use ark_ff::PrimeField;
 use ark_grumpkin::Projective as Projective2;
 use ark_std::time::Instant;
 
-use folding_schemes::commitment::{kzg::KZG, pedersen::Pedersen};
-use folding_schemes::folding::nova::{Nova, PreprocessorParam};
+use folding_schemes::commitment::pedersen::Pedersen;
+use folding_schemes::folding::protogalaxy::ProtoGalaxy;
 use folding_schemes::transcript::poseidon::poseidon_canonical_config;
 use folding_schemes::{Error, FoldingScheme};
 
@@ -74,44 +74,45 @@ fn main() -> Result<(), Error> {
 
     // ====================== SONOBE WIRING ====================================
     // Swap this single alias to compare folding schemes; the FCircuit and the
-    // z layout stay identical. HyperNova would be:
-    //   type N = folding_schemes::folding::hypernova::HyperNova<
-    //       Projective, Projective2, FC, CS1, CS2, MU, NU, false>;
+    // z layout stay identical. Nova would be:
+    //   type N = folding_schemes::folding::nova::Nova<C1, C2, FC, CS1, CS2, false>;
+    //   (Nova can use KZG for CS1; ProtoGalaxy uses Pedersen for both.)
     type C1 = Projective;
     type C2 = Projective2;
-    type CS1 = KZG<'static, Bn254>;
+    type CS1 = Pedersen<Projective>;
     type CS2 = Pedersen<Projective2>;
     type FC = DataQualityStepCircuit<Fr>;
-    type N = Nova<C1, C2, FC, CS1, CS2, false>;
+    type N = ProtoGalaxy<C1, C2, FC, CS1, CS2>;
 
     let mut rng = rand::rngs::OsRng;
     let poseidon_config = poseidon_canonical_config::<Fr>();
 
-    // 1. preprocess: derive prover/verifier params from the FCircuit + rng
-    println!("Prepare Nova's ProverParams & VerifierParams");
-    let prep_param = PreprocessorParam::new(poseidon_config, f_circuit.clone());
-    let nova_params = N::preprocess(&mut rng, &prep_param)?;
+    // 1. preprocess: derive prover/verifier params from the FCircuit + rng.
+    //    ProtoGalaxy's PreprocessorParam is just the (poseidon_config, FCircuit) tuple.
+    println!("Prepare ProtoGalaxy's ProverParams & VerifierParams");
+    let prep_param = (poseidon_config, f_circuit.clone());
+    let pg_params = N::preprocess(&mut rng, &prep_param)?;
 
     // 2. init the IVC at z_0
     println!("Initialize FoldingScheme");
-    let mut nova = N::init(&nova_params, f_circuit, z_0.clone())?;
+    let mut pg = N::init(&pg_params, f_circuit, z_0.clone())?;
 
     // 3. fold one order per step
     let t = Instant::now();
     for (i, ext) in external_inputs.iter().enumerate() {
         let start = Instant::now();
-        nova.prove_step(rng, *ext, None)?;
-        println!("Nova::prove_step {i}: {:?}", start.elapsed());
+        pg.prove_step(rng, *ext, None)?;
+        println!("ProtoGalaxy::prove_step {i}: {:?}", start.elapsed());
     }
     let elapsed = t.elapsed();
 
     // 4. verify the IVC proof
-    println!("Run Nova's IVC verifier");
-    let ivc_proof = nova.ivc_proof();
-    N::verify(nova_params.1, ivc_proof)?;
+    println!("Run ProtoGalaxy's IVC verifier");
+    let ivc_proof = pg.ivc_proof();
+    N::verify(pg_params.1, ivc_proof)?;
 
     // read out the running state
-    let z_i = nova.state();
+    let z_i = pg.state();
     let valid = z_i[0]; // must equal 1 if every order passed all checks
     let phi = z_i[1]; // RLC fingerprint -> bind to the dataset commitment / MPC
 
