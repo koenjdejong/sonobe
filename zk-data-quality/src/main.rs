@@ -132,15 +132,15 @@ fn main() -> Result<(), Error> {
 
 /* 5 orders
 folding 5 orders, 23 fields each, state_len=9
-Prepare ProtoGalaxy's ProverParams & VerifierParams
+Prepare HyperNova's ProverParams & VerifierParams
 Initialize FoldingScheme
-ProtoGalaxy::prove_step 0: 1.45962425s
-ProtoGalaxy::prove_step 1: 2.705653459s
-ProtoGalaxy::prove_step 2: 2.709888416s
-ProtoGalaxy::prove_step 3: 2.361065041s
-ProtoGalaxy::prove_step 4: 2.32695725s
-Run ProtoGalaxy's IVC verifier
-folded 5 orders in 11.563283333s
+HyperNova::prove_step 0: 1.365578542s
+HyperNova::prove_step 1: 2.027503625s
+HyperNova::prove_step 2: 2.021863625s
+HyperNova::prove_step 3: 2.063503583s
+HyperNova::prove_step 4: 2.075860583s
+Run HyperNova's IVC verifier
+folded 5 orders in 9.554398125s
 valid = 1  (1 == all orders passed every data-quality check)
 phi   = 17418569807843800795750841722005551770673501891093229536055977353257204643821  (RLC fingerprint over the canonical field stream)
 */
