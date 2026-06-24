@@ -48,7 +48,7 @@ fn main() -> Result<(), Error> {
     let n: usize = std::env::args()
         .nth(1)
         .and_then(|s| s.parse().ok())
-        .unwrap_or(10);
+        .unwrap_or(1000);
 
     let t_min = 0u64;
     let t_max = u64::MAX / 2;
@@ -121,3 +121,20 @@ fn main() -> Result<(), Error> {
     assert_eq!(valid, Fr::from(1u64), "some order failed a data-quality check");
     Ok(())
 }
+
+
+/* 100 orders
+Nova::prove_step 99: 2.524447166s
+Run Nova's IVC verifier
+folded 100 orders in 263.432949958s
+valid = 1  (1 == all orders passed every data-quality check)
+phi   = 16663750667764190420402924999120457077423314795492460127242554214062020004412  (RLC fingerprint over the canonical field stream)
+*/
+
+/* 1000 orders
+Nova::prove_step 999: 2.516657167s
+Run Nova's IVC verifier
+folded 1000 orders in 2466.361373875s
+valid = 1  (1 == all orders passed every data-quality check)
+phi   = 20086278831280422771215611809076114563767835786732472002048536257374972134231  (RLC fingerprint over the canonical field stream)
+*/
