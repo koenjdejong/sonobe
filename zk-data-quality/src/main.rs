@@ -20,7 +20,8 @@ use ark_grumpkin::Projective as Projective2;
 use ark_std::time::Instant;
 
 use folding_schemes::commitment::pedersen::Pedersen;
-use folding_schemes::folding::protogalaxy::ProtoGalaxy;
+use folding_schemes::folding::hypernova::HyperNova;
+use folding_schemes::folding::nova::PreprocessorParam;
 use folding_schemes::transcript::poseidon::poseidon_canonical_config;
 use folding_schemes::{Error, FoldingScheme};
 
@@ -74,45 +75,50 @@ fn main() -> Result<(), Error> {
 
     // ====================== SONOBE WIRING ====================================
     // Swap this single alias to compare folding schemes; the FCircuit and the
-    // z layout stay identical. Nova would be:
-    //   type N = folding_schemes::folding::nova::Nova<C1, C2, FC, CS1, CS2, false>;
-    //   (Nova can use KZG for CS1; ProtoGalaxy uses Pedersen for both.)
+    // z layout stay identical. Other schemes:
+    //   Nova:        folding::nova::Nova<C1, C2, FC, CS1, CS2, false>  (KZG ok for CS1)
+    //   ProtoGalaxy: folding::protogalaxy::ProtoGalaxy<C1, C2, FC, CS1, CS2>
+    // HyperNova folds CCS via sumcheck multifolding (Kothapalli-Setty 2023). The
+    // MU/NU const params are how many running/incoming instances are multifolded
+    // per step; 1/1 is the standard single-instance IVC. Uses Pedersen for both.
     type C1 = Projective;
     type C2 = Projective2;
     type CS1 = Pedersen<Projective>;
     type CS2 = Pedersen<Projective2>;
     type FC = DataQualityStepCircuit<Fr>;
-    type N = ProtoGalaxy<C1, C2, FC, CS1, CS2>;
+    const MU: usize = 1;
+    const NU: usize = 1;
+    type N = HyperNova<C1, C2, FC, CS1, CS2, MU, NU, false>;
 
     let mut rng = rand::rngs::OsRng;
     let poseidon_config = poseidon_canonical_config::<Fr>();
 
     // 1. preprocess: derive prover/verifier params from the FCircuit + rng.
-    //    ProtoGalaxy's PreprocessorParam is just the (poseidon_config, FCircuit) tuple.
-    println!("Prepare ProtoGalaxy's ProverParams & VerifierParams");
-    let prep_param = (poseidon_config, f_circuit.clone());
-    let pg_params = N::preprocess(&mut rng, &prep_param)?;
+    //    HyperNova reuses Nova's PreprocessorParam.
+    println!("Prepare HyperNova's ProverParams & VerifierParams");
+    let prep_param = PreprocessorParam::new(poseidon_config, f_circuit.clone());
+    let hn_params = N::preprocess(&mut rng, &prep_param)?;
 
     // 2. init the IVC at z_0
     println!("Initialize FoldingScheme");
-    let mut pg = N::init(&pg_params, f_circuit, z_0.clone())?;
+    let mut hn = N::init(&hn_params, f_circuit, z_0.clone())?;
 
     // 3. fold one order per step
     let t = Instant::now();
     for (i, ext) in external_inputs.iter().enumerate() {
         let start = Instant::now();
-        pg.prove_step(rng, *ext, None)?;
-        println!("ProtoGalaxy::prove_step {i}: {:?}", start.elapsed());
+        hn.prove_step(rng, *ext, None)?;
+        println!("HyperNova::prove_step {i}: {:?}", start.elapsed());
     }
     let elapsed = t.elapsed();
 
     // 4. verify the IVC proof
-    println!("Run ProtoGalaxy's IVC verifier");
-    let ivc_proof = pg.ivc_proof();
-    N::verify(pg_params.1, ivc_proof)?;
+    println!("Run HyperNova's IVC verifier");
+    let ivc_proof = hn.ivc_proof();
+    N::verify(hn_params.1, ivc_proof)?;
 
     // read out the running state
-    let z_i = pg.state();
+    let z_i = hn.state();
     let valid = z_i[0]; // must equal 1 if every order passed all checks
     let phi = z_i[1]; // RLC fingerprint -> bind to the dataset commitment / MPC
 
@@ -137,12 +143,4 @@ Run ProtoGalaxy's IVC verifier
 folded 5 orders in 11.563283333s
 valid = 1  (1 == all orders passed every data-quality check)
 phi   = 17418569807843800795750841722005551770673501891093229536055977353257204643821  (RLC fingerprint over the canonical field stream)
-*/
-
-/* 1000 orders
-Nova::prove_step 999: 2.516657167s
-Run Nova's IVC verifier
-folded 1000 orders in 2466.361373875s
-valid = 1  (1 == all orders passed every data-quality check)
-phi   = 20086278831280422771215611809076114563767835786732472002048536257374972134231  (RLC fingerprint over the canonical field stream)
 */
