@@ -3,7 +3,10 @@ use ark_ff::PrimeField;
 pub const MAX_ACTIONS: usize = 8;
 pub const MAX_GOODS: usize = 8;
 
-pub const FIELDS_PER_ORDER: usize = 3 + 7 * MAX_ACTIONS + 3 * MAX_GOODS;
+// header: id, active, vehicle_id, capacity (4)
+// per action: id, active, action_type, start_time, end_time, loc_id, lat, lon (8)
+// per good:   id, active, quantity, weight (4)
+pub const FIELDS_PER_ORDER: usize = 4 + 8 * MAX_ACTIONS + 4 * MAX_GOODS;
 
 pub const ACTION_LOAD: u64 = 1;
 pub const ACTION_UNLOAD: u64 = 2;

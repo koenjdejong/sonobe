@@ -1,10 +1,3 @@
-//! step_circuit.rs — the per-record step function F for the folding scheme.
-//!
-//! One fold step consumes ONE transport order (its FIELDS_PER_ORDER values as
-//! `external_inputs`) and updates a small constant-size state vector z. Folding n
-//! steps therefore touches at most one order's worth of witness at a time, which
-//! is exactly what removes the Noir O(n) memory blow-up.
-//!
 //! State layout z (length = STATE_LEN):
 //!   z[0] valid        running AND of all per-record checks            (0/1)
 //!   z[1] phi          RLC fingerprint   phi += pw * x_k               (accumulator)
@@ -16,10 +9,6 @@
 //!   z[7] t_min        currentness window lower bound (carried, pinned by z_0)
 //!   z[8] t_max        currentness window upper bound (carried, pinned by z_0)
 //!
-//! r, t_min, t_max are passed through UNCHANGED every step. Because z_0 is public
-//! in the IVC and F enforces z_out[i] == z_in[i] for those slots, they behave as
-//! public constants for the whole run without needing to be re-supplied per step.
-//!
 //! SOUNDNESS NOTE (do not ship without resolving):
 //!  - The adjacency check (no same-vehicle time overlap) is correct ONLY if the
 //!    folded stream is the committed dataset *sorted by (vehicle, start_time)*.
@@ -30,9 +19,6 @@
 //!          stream is a permutation of the committed order (Plonk-style perm. arg.,
 //!          Gabizon-Williamson-Ciobotaru 2019). This is "fold 4" in the diagram and
 //!          is left as a TODO below.
-//!  - r MUST be a Fiat-Shamir challenge derived AFTER the dataset commitment, as in
-//!    your Noir design (zeta chosen after commit). Deriving r is a protocol-layer
-//!    concern outside this circuit; here r arrives via z_0.
 
 use ark_ff::PrimeField;
 use ark_r1cs_std::{
@@ -85,116 +71,151 @@ impl<F: PrimeField> DataQualityStepCircuit<F> {
         let t_max = z_in[8].clone();
 
         // ---- parse the flattened order ------------------------------------
+        // Canonical layout (see otm::TransportOrder::flatten):
+        //   header: id, active, vehicle_id, capacity
+        //   then MAX_ACTIONS actions:  id, active, type, start, end, loc_id, lat, lon
+        //   then MAX_GOODS goods:      id, active, quantity, weight
+        //
+        // The `active` flags mark which array slots carry real data; the rest are
+        // fixed-size-array padding. Padding rows must NOT be validated and must NOT
+        // perturb the order's time span or the cross-order adjacency chain. Each flag
+        // is read as `== 1` (consistent with `fp_to_bool`) and gated accordingly.
         let order_id = &ext[0];
-        let vehicle_id = &ext[1];
-        let capacity = &ext[2];
-        let mut idx = 3;
+        let order_active = fp_to_bool(&ext[1])?;
+        let vehicle_id = &ext[2];
+        let capacity = &ext[3];
+        let mut idx = 4;
 
         let mut checks: Vec<Boolean<F>> = Vec::new();
 
         // ---- ROW-LOCAL VALIDITY (fold 1) ----------------------------------
+        // Header checks. The whole `checks` set is later gated by `order_active`,
+        // so an inactive (padding) order is vacuously valid regardless of these.
         checks.push(is_nonzero(order_id)?);
         checks.push(is_nonzero(vehicle_id)?);
         checks.push(is_nonzero(capacity)?); // capacity > 0 (u64 => != 0)
 
-        let mut cur_min_start: Option<FpVar<F>> = None;
-        let mut cur_max_end: Option<FpVar<F>> = None;
+        // Min start / max end taken over ACTIVE actions only. Sentinels keep padding
+        // from shifting the span: inactive start -> u64::MAX (can't lower the min),
+        // inactive end -> 0 (can't raise the max). Both sentinels fit in TIME_BITS.
+        let start_sentinel = FpVar::<F>::constant(F::from(u64::MAX));
+        let mut cur_min_start = start_sentinel.clone();
+        let mut cur_max_end = FpVar::<F>::zero();
 
         for _ in 0..MAX_ACTIONS {
             let a_id = &ext[idx];
-            let a_type = &ext[idx + 1];
-            let a_start = &ext[idx + 2];
-            let a_end = &ext[idx + 3];
-            let l_id = &ext[idx + 4];
-            let lat = &ext[idx + 5];
-            let lon = &ext[idx + 6];
-            idx += 7;
+            let a_active = fp_to_bool(&ext[idx + 1])?;
+            let a_type = &ext[idx + 2];
+            let a_start = &ext[idx + 3];
+            let a_end = &ext[idx + 4];
+            let l_id = &ext[idx + 5];
+            let lat = &ext[idx + 6];
+            let lon = &ext[idx + 7];
+            idx += 8;
 
-            checks.push(is_nonzero(a_id)?);
-            checks.push(is_nonzero(l_id)?);
+            // Per-action validity, collected then gated by this action's `active`.
+            let mut a_checks: Vec<Boolean<F>> = Vec::new();
+            a_checks.push(is_nonzero(a_id)?);
+            a_checks.push(is_nonzero(l_id)?);
 
             // action_type in {1,2,3}
             let t1 = a_type.is_eq(&FpVar::constant(F::from(1u64)))?;
             let t2 = a_type.is_eq(&FpVar::constant(F::from(2u64)))?;
             let t3 = a_type.is_eq(&FpVar::constant(F::from(3u64)))?;
-            checks.push(Boolean::kary_or(&[t1, t2, t3])?);
+            a_checks.push(Boolean::kary_or(&[t1, t2, t3])?);
 
             // start < end
-            checks.push(is_lt(cs.clone(), a_start, a_end, TIME_BITS)?);
+            a_checks.push(is_lt(cs.clone(), a_start, a_end, TIME_BITS)?);
 
             // currentness: t_min <= start  AND  end <= t_max
-            checks.push(is_leq(cs.clone(), &t_min, a_start, TIME_BITS)?);
-            checks.push(is_leq(cs.clone(), a_end, &t_max, TIME_BITS)?);
+            a_checks.push(is_leq(cs.clone(), &t_min, a_start, TIME_BITS)?);
+            a_checks.push(is_leq(cs.clone(), a_end, &t_max, TIME_BITS)?);
 
             // precision/range: latitude <= 90_000_000, longitude <= 180_000_000
-            checks.push(is_leq(cs.clone(), lat, &FpVar::constant(F::from(90_000_000u64)), TIME_BITS)?);
-            checks.push(is_leq(cs.clone(), lon, &FpVar::constant(F::from(180_000_000u64)), TIME_BITS)?);
+            a_checks.push(is_leq(cs.clone(), lat, &FpVar::constant(F::from(90_000_000u64)), TIME_BITS)?);
+            a_checks.push(is_leq(cs.clone(), lon, &FpVar::constant(F::from(180_000_000u64)), TIME_BITS)?);
 
-            // track this order's time span for the adjacency check
-            cur_min_start = Some(match cur_min_start {
-                None => a_start.clone(),
-                Some(prev) => {
-                    let le = is_leq(cs.clone(), a_start, &prev, TIME_BITS)?;
-                    FpVar::conditionally_select(&le, a_start, &prev)?
-                }
-            });
-            cur_max_end = Some(match cur_max_end {
-                None => a_end.clone(),
-                Some(prev) => {
-                    let ge = is_leq(cs.clone(), &prev, a_end, TIME_BITS)?;
-                    FpVar::conditionally_select(&ge, a_end, &prev)?
-                }
-            });
+            // inactive actions are vacuously valid
+            let a_all = Boolean::kary_and(&a_checks)?;
+            checks.push((!&a_active) | &a_all);
+
+            // track this order's time span over ACTIVE actions only
+            let eff_start = FpVar::conditionally_select(&a_active, a_start, &start_sentinel)?;
+            let eff_end = FpVar::conditionally_select(&a_active, a_end, &FpVar::<F>::zero())?;
+            let le = is_leq(cs.clone(), &eff_start, &cur_min_start, TIME_BITS)?;
+            cur_min_start = FpVar::conditionally_select(&le, &eff_start, &cur_min_start)?;
+            let ge = is_leq(cs.clone(), &cur_max_end, &eff_end, TIME_BITS)?;
+            cur_max_end = FpVar::conditionally_select(&ge, &eff_end, &cur_max_end)?;
         }
 
-        // capacity sweep: sum(weight*quantity) <= capacity (fold 1, accumulator form)
+        // capacity sweep: sum(weight*quantity) <= capacity (fold 1, accumulator form).
+        // Only ACTIVE goods are checked and contribute to the loaded weight.
         let mut total_weight = FpVar::<F>::zero();
         for _ in 0..MAX_GOODS {
             let g_id = &ext[idx];
-            let g_qty = &ext[idx + 1];
-            let g_wt = &ext[idx + 2];
-            idx += 3;
-            checks.push(is_nonzero(g_id)?);
-            checks.push(is_nonzero(g_qty)?); // quantity > 0
-            checks.push(is_nonzero(g_wt)?);  // weight   > 0
-            total_weight += g_wt * g_qty;
+            let g_active = fp_to_bool(&ext[idx + 1])?;
+            let g_qty = &ext[idx + 2];
+            let g_wt = &ext[idx + 3];
+            idx += 4;
+
+            let mut g_checks: Vec<Boolean<F>> = Vec::new();
+            g_checks.push(is_nonzero(g_id)?);
+            g_checks.push(is_nonzero(g_qty)?); // quantity > 0
+            g_checks.push(is_nonzero(g_wt)?);  // weight   > 0
+            let g_all = Boolean::kary_and(&g_checks)?;
+            checks.push((!&g_active) | &g_all);
+
+            // only active goods load the vehicle
+            let contribution = g_wt * g_qty;
+            total_weight += FpVar::conditionally_select(&g_active, &contribution, &FpVar::<F>::zero())?;
         }
         checks.push(is_leq(cs.clone(), &total_weight, capacity, SUM_BITS)?);
         debug_assert_eq!(idx, FIELDS_PER_ORDER);
 
         // ---- CROSS-ENTRY ADJACENCY (fold 3) -------------------------------
-        // same_vehicle AND has_prev  =>  prev_end <= cur_min_start
-        let cur_min_start = cur_min_start.unwrap();
-        let cur_max_end = cur_max_end.unwrap();
+        // same_vehicle AND has_prev AND order_active  =>  prev_end <= cur_min_start.
+        // An inactive (padding) order is excluded from the chain entirely.
         let same_vehicle = vehicle_id.is_eq(&prev_vehicle)?;
-        let has_prev_bool = has_prev_to_bool(&has_prev)?;
-        let active = &same_vehicle & &has_prev_bool;
+        let has_prev_bool = fp_to_bool(&has_prev)?;
+        let adj_active = &(&same_vehicle & &has_prev_bool) & &order_active;
         let ordered = is_leq(cs.clone(), &prev_end, &cur_min_start, TIME_BITS)?;
-        // adjacency_ok = !active OR ordered
-        let adjacency_ok = (!&active) | &ordered;
+        // adjacency_ok = !adj_active OR ordered
+        let adjacency_ok = (!&adj_active) | &ordered;
         checks.push(adjacency_ok);
 
         // ---- RLC FINGERPRINT (fold 2) -------------------------------------
         // phi += pw * x_k ; pw *= r   over the SAME canonical field order.
+        // Every field (active flags included) is absorbed, so phi commits to the
+        // full padded stream exactly as `derive_challenge` does in main.rs.
         for k in 0..FIELDS_PER_ORDER {
             phi += &pw * &ext[k];
             pw *= &r;
         }
 
         // ---- fold all booleans into the running validity flag -------------
+        // Inactive orders are vacuously valid: gate the whole check set by order_active.
         let all_local = Boolean::kary_and(&checks)?;
+        let order_ok = (!&order_active) | &all_local;
         let valid_in_bool = fp_to_bool(valid_in)?;
-        let valid_out = &valid_in_bool & &all_local;
+        let valid_out = &valid_in_bool & &order_ok;
 
         // ---- assemble next state ------------------------------------------
+        // The adjacency chain (prev_vehicle, prev_end, has_prev) only advances on
+        // ACTIVE orders; padding orders pass the previous chain state through so they
+        // can't sever the link between two real orders.
+        let next_vehicle = FpVar::conditionally_select(&order_active, vehicle_id, &prev_vehicle)?;
+        let next_end = FpVar::conditionally_select(&order_active, &cur_max_end, &prev_end)?;
+        let next_has_prev =
+            FpVar::conditionally_select(&order_active, &FpVar::constant(F::one()), &has_prev)?;
+
         let mut z_out = vec![FpVar::<F>::zero(); STATE_LEN];
         z_out[0] = FpVar::from(valid_out);
         z_out[1] = phi;
         z_out[2] = pw;
         z_out[3] = r;                    // pinned
-        z_out[4] = vehicle_id.clone();
-        z_out[5] = cur_max_end;
-        z_out[6] = FpVar::constant(F::one()); // has_prev := 1
+        z_out[4] = next_vehicle;
+        z_out[5] = next_end;
+        z_out[6] = next_has_prev;
         z_out[7] = t_min;                // pinned
         z_out[8] = t_max;                // pinned
 
@@ -212,9 +233,6 @@ impl<F: PrimeField> DataQualityStepCircuit<F> {
 fn fp_to_bool<F: PrimeField>(x: &FpVar<F>) -> Result<Boolean<F>, SynthesisError> {
     // is_eq with 1; combined with the 0/1 invariant maintained by the circuit.
     x.is_eq(&FpVar::constant(F::one()))
-}
-fn has_prev_to_bool<F: PrimeField>(x: &FpVar<F>) -> Result<Boolean<F>, SynthesisError> {
-    fp_to_bool(x)
 }
 
 // -----------------------------------------------------------------------------
@@ -271,13 +289,7 @@ impl<F: PrimeField> FCircuit<F> for DataQualityStepCircuit<F> {
     fn state_len(&self) -> usize {
         STATE_LEN
     }
-    fn generate_step_constraints(
-        &self,
-        cs: ConstraintSystemRef<F>,
-        _i: usize,
-        z_i: Vec<FpVar<F>>,
-        external_inputs: Self::ExternalInputsVar,
-    ) -> Result<Vec<FpVar<F>>, SynthesisError> {
+    fn generate_step_constraints(&self, cs: ConstraintSystemRef<F>,_i: usize, z_i: Vec<FpVar<F>>, external_inputs: Self::ExternalInputsVar) -> Result<Vec<FpVar<F>>, SynthesisError> {
         self.step(cs, &z_i, &external_inputs.0)
     }
 }
@@ -318,11 +330,18 @@ mod tests {
         assert_eq!(valid, Fr::from(1u64), "a well-formed order must validate");
     }
 
+    // Field offsets in the flattened layout (header is 4 wide; actions are 8 wide):
+    //   [0]=order id, [1]=order active, [2]=vehicle id, [3]=capacity
+    //   action 0: [4]=id, [5]=active, [6]=type, [7]=start, [8]=end, [9]=loc, [10]=lat, [11]=lon
+    const ORDER_ACTIVE: usize = 1;
+    const CAPACITY: usize = 3;
+    const A0_ACTIVE: usize = 5;
+    const A0_TYPE: usize = 6;
+
     #[test]
     fn bad_action_type_is_invalid() {
         let mut ext: Vec<Fr> = synthetic_orders(1)[0].flatten_field();
-        // index 4 = first action's action_type; 7 is outside the allowed {1,2,3}
-        ext[4] = Fr::from(7u64);
+        ext[A0_TYPE] = Fr::from(7u64); // 7 is outside the allowed {1,2,3}
         let (valid, satisfied) = run_step(ext);
         assert!(satisfied, "system stays satisfiable; validity is computed not forced");
         assert_eq!(valid, Fr::from(0u64), "an illegal action_type must fail validation");
@@ -331,9 +350,32 @@ mod tests {
     #[test]
     fn overweight_order_is_invalid() {
         let mut ext: Vec<Fr> = synthetic_orders(1)[0].flatten_field();
-        // index 2 = vehicle capacity; shrink it below the goods' total weight
-        ext[2] = Fr::from(1u64);
+        ext[CAPACITY] = Fr::from(1u64); // shrink capacity below the goods' total weight
         let (valid, _satisfied) = run_step(ext);
         assert_eq!(valid, Fr::from(0u64), "exceeding capacity must fail validation");
+    }
+
+    #[test]
+    fn inactive_action_skips_its_checks() {
+        let mut ext: Vec<Fr> = synthetic_orders(1)[0].flatten_field();
+        // Garbage action_type would normally fail, but deactivating the slot makes
+        // it padding, so its checks are skipped and the order still validates.
+        ext[A0_TYPE] = Fr::from(7u64);
+        ext[A0_ACTIVE] = Fr::from(0u64);
+        let (valid, satisfied) = run_step(ext);
+        assert!(satisfied, "constraint system must be satisfiable");
+        assert_eq!(valid, Fr::from(1u64), "an inactive action must not be validated");
+    }
+
+    #[test]
+    fn inactive_order_is_vacuously_valid() {
+        let mut ext: Vec<Fr> = synthetic_orders(1)[0].flatten_field();
+        // Corrupt the order and mark it inactive: the whole record is padding.
+        ext[A0_TYPE] = Fr::from(7u64);
+        ext[CAPACITY] = Fr::from(1u64);
+        ext[ORDER_ACTIVE] = Fr::from(0u64);
+        let (valid, satisfied) = run_step(ext);
+        assert!(satisfied, "constraint system must be satisfiable");
+        assert_eq!(valid, Fr::from(1u64), "an inactive order must not be validated");
     }
 }
