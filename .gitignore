@@ -15,3 +15,6 @@ examples/*.calldata
 examples/*.inputs
 *.serialized
 */*.serialized
+
+# IDE specific files
+.vscode/

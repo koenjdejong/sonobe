@@ -41,6 +41,7 @@ fn initial_state<F: PrimeField>(r: u64, t_min: u64, t_max: u64) -> Vec<F> {
     z[6] = F::zero(); // has_prev = 0
     z[7] = F::from(t_min);
     z[8] = F::from(t_max);
+
     z
 }
 
@@ -139,10 +140,7 @@ valid = 1  (1 == all orders passed every data-quality check)
 phi   = 17418569807843800795750841722005551770673501891093229536055977353257204643821  (RLC fingerprint over the canonical field stream)
 */
 
-/* 1000 orders
-Nova::prove_step 999: 2.516657167s
-Run Nova's IVC verifier
-folded 1000 orders in 2466.361373875s
-valid = 1  (1 == all orders passed every data-quality check)
-phi   = 20086278831280422771215611809076114563767835786732472002048536257374972134231  (RLC fingerprint over the canonical field stream)
+
+/* 1000 orders, with --release tag
+
 */
