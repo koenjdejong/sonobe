@@ -144,3 +144,17 @@ folded 5 orders in 9.554398125s
 valid = 1  (1 == all orders passed every data-quality check)
 phi   = 17418569807843800795750841722005551770673501891093229536055977353257204643821  (RLC fingerprint over the canonical field stream)
 */
+
+
+/* 1000, with --release
+HyperNova::prove_step 994: 151.642792ms
+HyperNova::prove_step 995: 152.489125ms
+HyperNova::prove_step 996: 151.43825ms
+HyperNova::prove_step 997: 154.85375ms
+HyperNova::prove_step 998: 155.875042ms
+HyperNova::prove_step 999: 161.019916ms
+Run HyperNova's IVC verifier
+folded 1000 orders in 157.880251167s
+valid = 1  (1 == all orders passed every data-quality check)
+phi   = 20086278831280422771215611809076114563767835786732472002048536257374972134231  (RLC fingerprint over the canonical field stream)
+*/
