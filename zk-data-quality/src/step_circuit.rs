@@ -36,15 +36,17 @@
 
 use ark_ff::PrimeField;
 use ark_r1cs_std::{
+    alloc::{AllocVar, AllocationMode},
     boolean::Boolean,
     eq::EqGadget,
     fields::{fp::FpVar, FieldVar},
     select::CondSelectGadget,
 };
-use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
+use ark_relations::r1cs::{ConstraintSystemRef, Namespace, SynthesisError};
+use core::borrow::Borrow;
 
 use crate::gadgets::{is_leq, is_lt, is_nonzero};
-use crate::orders::{FIELDS_PER_ORDER, MAX_ACTIONS, MAX_GOODS};
+use crate::otm::{FIELDS_PER_ORDER, MAX_ACTIONS, MAX_GOODS};
 
 pub const STATE_LEN: usize = 9;
 const TIME_BITS: usize = 64; // timestamps, lat/long fit in u64
@@ -220,19 +222,48 @@ fn has_prev_to_bool<F: PrimeField>(x: &FpVar<F>) -> Result<Boolean<F>, Synthesis
 //
 // This rev of Sonobe uses the associated-types shape: the external input for one
 // fold step is a strongly-typed value implementing `AllocVar`. One transport order
-// is exactly FIELDS_PER_ORDER field elements, so we use a fixed-size array
-// `[F; FIELDS_PER_ORDER]` (its `Default` yields the correct length, which the
-// folding framework relies on when it builds the augmented circuit).
+// is exactly FIELDS_PER_ORDER field elements. A bare `[F; FIELDS_PER_ORDER]` would
+// be the natural choice, but std only derives `Default` for arrays up to length 32
+// and FIELDS_PER_ORDER is 43, so we wrap a `Vec` in a newtype and implement
+// `Default`/`AllocVar` by hand (mirroring Sonobe's own `VecF`/`VecFpVar`). The
+// `Default` impl yields a vector of the correct length, which the folding framework
+// relies on when it builds the augmented circuit.
 //
-// The body is just: self.step(cs, &z_i, &external_inputs).
+// The body is just: self.step(cs, &z_i, &external_inputs.0).
 // -----------------------------------------------------------------------------
 use folding_schemes::frontend::FCircuit;
 use folding_schemes::Error;
 
+/// One transport order flattened to its FIELDS_PER_ORDER field elements (native).
+#[derive(Clone, Debug)]
+pub struct OrderInputs<F: PrimeField>(pub Vec<F>);
+impl<F: PrimeField> Default for OrderInputs<F> {
+    fn default() -> Self {
+        OrderInputs(vec![F::zero(); FIELDS_PER_ORDER])
+    }
+}
+
+/// In-circuit counterpart of `OrderInputs`.
+#[derive(Clone, Debug)]
+pub struct OrderInputsVar<F: PrimeField>(pub Vec<FpVar<F>>);
+impl<F: PrimeField> AllocVar<OrderInputs<F>, F> for OrderInputsVar<F> {
+    fn new_variable<T: Borrow<OrderInputs<F>>>(
+        cs: impl Into<Namespace<F>>,
+        f: impl FnOnce() -> Result<T, SynthesisError>,
+        mode: AllocationMode,
+    ) -> Result<Self, SynthesisError> {
+        f().and_then(|val| {
+            let cs = cs.into();
+            let v = Vec::<FpVar<F>>::new_variable(cs, || Ok(val.borrow().0.clone()), mode)?;
+            Ok(OrderInputsVar(v))
+        })
+    }
+}
+
 impl<F: PrimeField> FCircuit<F> for DataQualityStepCircuit<F> {
     type Params = ();
-    type ExternalInputs = [F; FIELDS_PER_ORDER];
-    type ExternalInputsVar = [FpVar<F>; FIELDS_PER_ORDER];
+    type ExternalInputs = OrderInputs<F>;
+    type ExternalInputsVar = OrderInputsVar<F>;
 
     fn new(_: ()) -> Result<Self, Error> {
         Ok(Self::new())
@@ -247,7 +278,7 @@ impl<F: PrimeField> FCircuit<F> for DataQualityStepCircuit<F> {
         z_i: Vec<FpVar<F>>,
         external_inputs: Self::ExternalInputsVar,
     ) -> Result<Vec<FpVar<F>>, SynthesisError> {
-        self.step(cs, &z_i, &external_inputs)
+        self.step(cs, &z_i, &external_inputs.0)
     }
 }
 

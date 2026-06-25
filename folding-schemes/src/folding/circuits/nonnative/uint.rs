@@ -676,7 +676,7 @@ impl<F: PrimeField> NonNativeUintVar<F> {
                 .0
                 .iter()
                 .zip(&c_powers)
-                .map(|(v, t)| (&v.v * *t))
+                .map(|(v, t)| &v.v * *t)
                 .collect::<Vec<_>>()
                 .iter()
                 .sum::<FpVar<_>>();
@@ -685,7 +685,7 @@ impl<F: PrimeField> NonNativeUintVar<F> {
                 .0
                 .iter()
                 .zip(&c_powers)
-                .map(|(v, t)| (&v.v * *t))
+                .map(|(v, t)| &v.v * *t)
                 .collect::<Vec<_>>()
                 .iter()
                 .sum::<FpVar<_>>();

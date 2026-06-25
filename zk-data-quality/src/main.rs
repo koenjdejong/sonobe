@@ -11,6 +11,7 @@
 #![allow(non_upper_case_globals)]
 
 mod gadgets;
+mod otm;
 mod orders;
 mod step_circuit;
 
@@ -24,8 +25,10 @@ use folding_schemes::folding::protogalaxy::ProtoGalaxy;
 use folding_schemes::transcript::poseidon::poseidon_canonical_config;
 use folding_schemes::{Error, FoldingScheme};
 
-use orders::{synthetic_orders, FIELDS_PER_ORDER};
-use step_circuit::{DataQualityStepCircuit, STATE_LEN};
+use orders::{synthetic_orders};
+use step_circuit::{DataQualityStepCircuit, OrderInputs, STATE_LEN};
+
+use crate::otm::FIELDS_PER_ORDER;
 
 /// Build the public initial state z_0.
 /// `r` is a placeholder here; in the real protocol it is a Fiat-Shamir challenge
@@ -57,12 +60,12 @@ fn main() -> Result<(), Error> {
 
     let dataset = synthetic_orders(n);
     // one fold step consumes one order, flattened into FIELDS_PER_ORDER field elems
-    let external_inputs: Vec<[Fr; FIELDS_PER_ORDER]> = dataset
+    let external_inputs: Vec<OrderInputs<Fr>> = dataset
         .iter()
         .map(|o| {
-            o.flatten_field::<Fr>()
-                .try_into()
-                .expect("flatten_field must produce FIELDS_PER_ORDER elements")
+            let v = o.flatten_field::<Fr>();
+            debug_assert_eq!(v.len(), FIELDS_PER_ORDER);
+            OrderInputs(v)
         })
         .collect();
 
@@ -102,7 +105,7 @@ fn main() -> Result<(), Error> {
     let t = Instant::now();
     for (i, ext) in external_inputs.iter().enumerate() {
         let start = Instant::now();
-        pg.prove_step(rng, *ext, None)?;
+        pg.prove_step(rng, ext.clone(), None)?;
         println!("ProtoGalaxy::prove_step {i}: {:?}", start.elapsed());
     }
     let elapsed = t.elapsed();
