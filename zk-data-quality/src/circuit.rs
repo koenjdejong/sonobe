@@ -6,19 +6,29 @@
 //!   z[4] prev_vehicle previous order's vehicle id  (for adjacency)
 //!   z[5] prev_end     previous order's max end_time (for adjacency)
 //!   z[6] has_prev     0 on the first step, 1 thereafter
-//!   z[7] t_min        currentness window lower bound (carried, pinned by z_0)
-//!   z[8] t_max        currentness window upper bound (carried, pinned by z_0)
+//!   z[7]  t_min       currentness window lower bound (carried, pinned by z_0)
+//!   z[8]  t_max       currentness window upper bound (carried, pinned by z_0)
+//!   z[9]  gamma       grand-product challenge, carried unchanged (pinned by z_0)
+//!   z[10] gp          grand-product accumulator gp *= (gamma - fp(order)) (starts 1)
 //!
-//! SOUNDNESS NOTE (do not ship without resolving):
+//! SOUNDNESS NOTE:
 //!  - The adjacency check (no same-vehicle time overlap) is correct ONLY if the
 //!    folded stream is the committed dataset *sorted by (vehicle, start_time)*.
 //!    Two routes to make that sound, matching your slide:
 //!      (a) define the dataset commitment over the sorted order, so no permutation
 //!          proof is needed (simplest; the MPC must use the same order); or
-//!      (b) add a grand-product / multiset-equality fold certifying the sorted
-//!          stream is a permutation of the committed order (Plonk-style perm. arg.,
-//!          Gabizon-Williamson-Ciobotaru 2019). This is "fold 4" in the diagram and
-//!          is left as a TODO below.
+//!      (b) certify, via a grand-product / multiset-equality argument, that the
+//!          folded (sorted) stream is a permutation of the committed order
+//!          (Plonk-style perm. arg., Gabizon-Williamson-Ciobotaru 2019).
+//!    Route (b) is "fold 4" and is implemented below: each step compresses its
+//!    order to a single field fp(order) = Σ_k r^k·x_k and folds it into a running
+//!    grand product gp *= (gamma - fp(order)). After the run, gp equals the product
+//!    over the FOLDED stream; the decider (main.rs) computes the same product over
+//!    the COMMITTED order and asserts equality. Equal products ⇒ equal multisets
+//!    (whp over gamma) ⇒ the fold is a genuine permutation of the commitment. Under
+//!    route (a) the two streams coincide, so the check simply confirms the
+//!    accumulator; under a sorted fold over an unsorted commitment it certifies the
+//!    sort. gamma must be a Fiat-Shamir challenge drawn after the commitment, like r.
 
 use ark_ff::PrimeField;
 use ark_r1cs_std::{
@@ -34,7 +44,7 @@ use core::borrow::Borrow;
 use crate::gadgets::{is_leq, is_lt, is_nonzero};
 use crate::otm::{FIELDS_PER_ORDER, MAX_ACTIONS, MAX_GOODS};
 
-pub const STATE_LEN: usize = 9;
+pub const STATE_LEN: usize = 11;
 const TIME_BITS: usize = 64; // timestamps, lat/long fit in u64
 const SUM_BITS: usize = 128; // weight*quantity summed over goods: widen to be safe
 
@@ -69,6 +79,8 @@ impl<F: PrimeField> DataQualityStepCircuit<F> {
         let has_prev = z_in[6].clone();
         let t_min = z_in[7].clone();
         let t_max = z_in[8].clone();
+        let gamma = z_in[9].clone();
+        let mut gp = z_in[10].clone();
 
         // ---- parse the flattened order ------------------------------------
         // Canonical layout (see otm::TransportOrder::flatten):
@@ -187,10 +199,27 @@ impl<F: PrimeField> DataQualityStepCircuit<F> {
         // phi += pw * x_k ; pw *= r   over the SAME canonical field order.
         // Every field (active flags included) is absorbed, so phi commits to the
         // full padded stream exactly as `derive_challenge` does in main.rs.
+        //
+        // In the same sweep, build this order's standalone fingerprint
+        //   fp(order) = Σ_k r^k · x_k
+        // using a power series that RESTARTS at r^0 each step (independent of the
+        // global pw, which never resets). This per-order scalar is the multiset
+        // element consumed by the grand product below.
+        let mut order_fp = FpVar::<F>::zero();
+        let mut order_pw = FpVar::<F>::one();
         for k in 0..FIELDS_PER_ORDER {
             phi += &pw * &ext[k];
             pw *= &r;
+            order_fp += &order_pw * &ext[k];
+            order_pw *= &r;
         }
+
+        // ---- GRAND-PRODUCT PERMUTATION ACCUMULATOR (fold 4) ---------------
+        // gp *= (gamma - fp(order)) over the FOLDED stream. Every order (active or
+        // padding) participates, matching the committed-order product the decider
+        // recomputes in main.rs; equal products certify the fold is a permutation
+        // of the commitment. See the soundness note at the top of this file.
+        gp = &gp * &(&gamma - &order_fp);
 
         // ---- fold all booleans into the running validity flag -------------
         // Inactive orders are vacuously valid: gate the whole check set by order_active.
@@ -218,12 +247,8 @@ impl<F: PrimeField> DataQualityStepCircuit<F> {
         z_out[6] = next_has_prev;
         z_out[7] = t_min;                // pinned
         z_out[8] = t_max;                // pinned
-
-        // TODO (fold 4): grand-product permutation accumulator. Multiply a running
-        // product by (gamma - fingerprint(order)) here, and assert at the decider
-        // that it equals the product over the committed order. Until then, the
-        // adjacency result is sound only under route (a) above (commit in sorted
-        // order). See the soundness note at the top of this file.
+        z_out[9] = gamma;                // pinned
+        z_out[10] = gp;
 
         Ok(z_out)
     }
@@ -313,6 +338,8 @@ mod tests {
         z[3] = Fr::from(0x5eedu64); // r
         z[7] = Fr::from(0u64); // t_min
         z[8] = Fr::from(u64::MAX / 2); // t_max
+        z[9] = Fr::from(0xfeedu64); // gamma
+        z[10] = Fr::from(1u64); // gp = empty product
 
         let z_in = Vec::<FpVar<Fr>>::new_witness(cs.clone(), || Ok(z)).unwrap();
         let ext = Vec::<FpVar<Fr>>::new_witness(cs.clone(), || Ok(ext_vals)).unwrap();
