@@ -7945,6 +7945,7 @@ name = "zk-data-quality"
 version = "0.1.0"
 dependencies = [
  "ark-bn254 0.5.0",
+ "ark-crypto-primitives",
  "ark-ff 0.5.0",
  "ark-grumpkin",
  "ark-r1cs-std",

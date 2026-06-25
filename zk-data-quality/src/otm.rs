@@ -10,7 +10,7 @@ pub const ACTION_UNLOAD: u64 = 2;
 pub const ACTION_WAYPOINT: u64 = 3;
 
 type ID = u64;
-// type ACTIVE = bool;
+type ACTIVE = bool;
 
 #[derive(Clone, Debug)]
 pub struct Location { 
@@ -22,6 +22,7 @@ pub struct Location {
 #[derive(Clone, Debug)]
 pub struct Action {
     pub id: ID,
+    pub active: ACTIVE,
     pub location: Location,
     pub start_time: u64,
     pub end_time: u64,
@@ -31,7 +32,7 @@ pub struct Action {
 #[derive(Clone, Debug)]
 pub struct Good {
     pub id: ID,
-    // pub active: ACTIVE, 
+    pub active: ACTIVE, 
     pub weight: u64, 
     pub quantity: u64,
 }
@@ -45,6 +46,7 @@ pub struct Vehicle {
 #[derive(Clone, Debug)]
 pub struct TransportOrder {
     pub id: ID,
+    pub active: ACTIVE,
     pub vehicle: Vehicle,
     pub actions: [Action; MAX_ACTIONS],
     pub goods: [Good; MAX_GOODS],
@@ -54,10 +56,12 @@ impl TransportOrder {
     pub fn flatten(&self) -> Vec<u64> {
         let mut v = Vec::with_capacity(FIELDS_PER_ORDER);
         v.push(self.id);
+        v.push(self.active as u64);
         v.push(self.vehicle.id);
         v.push(self.vehicle.capacity);
         for a in &self.actions {
             v.push(a.id);
+            v.push(a.active as u64);
             v.push(a.action_type);
             v.push(a.start_time);
             v.push(a.end_time);
@@ -67,6 +71,7 @@ impl TransportOrder {
         }
         for g in &self.goods {
             v.push(g.id);
+            v.push(g.active as u64);
             v.push(g.quantity);
             v.push(g.weight);
         }

@@ -12,6 +12,10 @@ use ark_bn254::{Fr, G1Projective as BN254};
 use ark_ff::PrimeField;
 use ark_grumpkin::Projective as Grumpkin;
 use ark_std::time::Instant;
+use ark_crypto_primitives::sponge::{
+    poseidon::{PoseidonConfig, PoseidonSponge},
+    Absorb, CryptographicSponge,
+};
 
 use folding_schemes::commitment::pedersen::Pedersen;
 use folding_schemes::folding::hypernova::HyperNova;
@@ -25,12 +29,12 @@ use circuit::{DataQualityStepCircuit, OrderInputs, STATE_LEN};
 
 use crate::otm::FIELDS_PER_ORDER;
 
-fn initial_state<F: PrimeField>(r: u64, t_min: u64, t_max: u64) -> Vec<F> {
+fn initial<F: PrimeField>(r: F, t_min: u64, t_max: u64) -> Vec<F> {
     let mut z = vec![F::zero(); STATE_LEN];
     z[0] = F::one(); // valid starts true
     z[1] = F::zero(); // phi  = 0
     z[2] = F::one(); // pw   = r^0 = 1
-    z[3] = F::from(r); // r
+    z[3] = r; // r
     z[4] = F::zero(); // prev_vehicle (unused on first step)
     z[5] = F::zero(); // prev_end
     z[6] = F::zero(); // has_prev = 0
@@ -40,46 +44,48 @@ fn initial_state<F: PrimeField>(r: u64, t_min: u64, t_max: u64) -> Vec<F> {
     z
 }
 
+fn derive_challenge<F: PrimeField + Absorb>(
+    config: &PoseidonConfig<F>,
+    external_inputs: &[OrderInputs<F>],
+) -> F {
+    let mut sponge = PoseidonSponge::<F>::new(config);
+    sponge.absorb(&F::from_le_bytes_mod_order(b"zk-data-quality-challenge"));
+    sponge.absorb(&F::from(external_inputs.len() as u64));
+    for oi in external_inputs {
+        // absorb this order's flattened field elements in canonical order
+        sponge.absorb(&oi.0);
+    }
+    sponge.squeeze_field_elements::<F>(1)[0]
+}
+
 struct ProofBuilder<FS>
 where FS: FoldingScheme<BN254, Grumpkin, DataQualityStepCircuit<Fr>>,
 {
-    n: usize,
-    r: u64,
+    external_inputs: Vec<OrderInputs<Fr>>,
+    r: Fr,
     t_min: u64,
     t_max: u64,
     _marker: std::marker::PhantomData<FS>,
 }
 
 impl<FS> ProofBuilder<FS> where FS: FoldingScheme<BN254, Grumpkin, DataQualityStepCircuit<Fr>> {
-    fn new(n: usize, r: u64, t_min: u64, t_max: u64) -> Self {
-        Self { n, r, t_min, t_max, _marker: PhantomData }
+    fn new(external_inputs: Vec<OrderInputs<Fr>>, r: Fr, t_min: u64, t_max: u64) -> Self {
+        Self { external_inputs, r, t_min, t_max, _marker: PhantomData }
     }
 
     fn build(&self, name: &str, prep_param: FS::PreprocessorParam) -> Result<(), Error> {
+        let n = self.external_inputs.len();
         let f_circuit = DataQualityStepCircuit::<Fr>::new();
         let mut rng = rand::rngs::OsRng;
 
-        // one fold step consumes one order, flattened into FIELDS_PER_ORDER field elems
-        let external_inputs: Vec<OrderInputs<Fr>> = synthetic_orders(self.n)
-            .iter()
-            .map(|o| {
-                let v = o.flatten_field::<Fr>();
-                debug_assert_eq!(v.len(), FIELDS_PER_ORDER);
-                OrderInputs(v)
-            })
-            .collect();
-
-        println!(
-            "[{name}] folding {} orders, {FIELDS_PER_ORDER} fields each, state_len={STATE_LEN}",
-            self.n
-        );
+        println!("[{name}] folding {} orders, {FIELDS_PER_ORDER} fields each, state_len={STATE_LEN}", n);
 
         let fs_params = FS::preprocess(&mut rng, &prep_param)?;
-        let z_0 = initial_state::<Fr>(self.r, self.t_min, self.t_max);
+        let z_0 = initial::<Fr>(self.r, self.t_min, self.t_max);
         let mut folding = FS::init(&fs_params, f_circuit, z_0)?;
 
         let t = Instant::now();
-        for ext in external_inputs.iter() {
+        for ext in self.external_inputs.iter() {
             // Can print something here for each step
             folding.prove_step(rng, ext.clone(), None)?;
         }
@@ -91,7 +97,7 @@ impl<FS> ProofBuilder<FS> where FS: FoldingScheme<BN254, Grumpkin, DataQualitySt
         let z_i = folding.state();
         let valid = z_i[0]; // must equal 1 if every order passed all checks
         let phi = z_i[1]; // RLC fingerprint -> bind to the dataset commitment / MPC
-        println!("[{name}] folded {} orders in {elapsed:?}", self.n);
+        println!("[{name}] folded {} orders in {elapsed:?}", n);
         println!("[{name}] valid = {valid}  phi = {phi}");
         assert_eq!(valid, Fr::from(1u64), "some order failed a data-quality check");
         Ok(())
@@ -104,29 +110,32 @@ fn main() -> Result<(), Error> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(10);
 
+    let dataset: Vec<OrderInputs<Fr>> = synthetic_orders(n)
+        .iter()
+        .map(|o| OrderInputs(o.flatten_field()))
+        .collect();
+
+    let poseidon_config = poseidon_canonical_config::<Fr>();
+    let r = derive_challenge::<Fr>(&poseidon_config, &dataset);
+    println!("[fiat-shamir] challenge r = {r}");
 
     let t_min = 0u64;
     let t_max = u64::MAX / 2;
-    let r = 0x5eed_u64; // placeholder challenge
-
-    let dataset = synthetic_orders(n);
 
     let f_circuit = DataQualityStepCircuit::<Fr>::new();
     let poseidon_config = poseidon_canonical_config::<Fr>();
 
     type FSNova = Nova<BN254, Grumpkin, DataQualityStepCircuit<Fr>, Pedersen<BN254>, Pedersen<Grumpkin>, false>;
     let nova_prep = PreprocessorParam::new(poseidon_config.clone(), f_circuit.clone());
-    ProofBuilder::<FSNova>::new(n, r, t_min, t_max).build("Nova", nova_prep)?;
+    ProofBuilder::<FSNova>::new(dataset.clone(), r, t_min, t_max).build("Nova", nova_prep)?;
 
     type FSHyperNova = HyperNova<BN254, Grumpkin, DataQualityStepCircuit<Fr>, Pedersen<BN254>, Pedersen<Grumpkin>, 1, 1, false>;
     let hn_prep = PreprocessorParam::new(poseidon_config.clone(), f_circuit.clone());
-    ProofBuilder::<FSHyperNova>::new(n, r, t_min, t_max).build("HyperNova", hn_prep)?;
+    ProofBuilder::<FSHyperNova>::new(dataset.clone(), r, t_min, t_max).build("HyperNova", hn_prep)?;
 
     type FSProtoGalaxy = ProtoGalaxy<BN254, Grumpkin, DataQualityStepCircuit<Fr>, Pedersen<BN254>, Pedersen<Grumpkin>>;
     let pg_prep = (poseidon_config.clone(), f_circuit.clone());
-    ProofBuilder::<FSProtoGalaxy>::new(n, r, t_min, t_max).build("ProtoGalaxy", pg_prep)?;
-
-
+    ProofBuilder::<FSProtoGalaxy>::new(dataset.clone(), r, t_min, t_max).build("ProtoGalaxy", pg_prep)?;
 
     Ok(())
 }
