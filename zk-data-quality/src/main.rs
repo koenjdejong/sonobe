@@ -142,5 +142,15 @@ phi   = 174185698078438007957508417220055517706735018910932295360559773532572046
 
 
 /* 1000 orders, with --release tag
-
+ProtoGalaxy::prove_step 993: 174.482ms
+ProtoGalaxy::prove_step 994: 186.599125ms
+ProtoGalaxy::prove_step 995: 170.024666ms
+ProtoGalaxy::prove_step 996: 158.400167ms
+ProtoGalaxy::prove_step 997: 161.548542ms
+ProtoGalaxy::prove_step 998: 157.6995ms
+ProtoGalaxy::prove_step 999: 158.972917ms
+Run ProtoGalaxy's IVC verifier
+folded 1000 orders in 159.6129455s
+valid = 1  (1 == all orders passed every data-quality check)
+phi   = 20086278831280422771215611809076114563767835786732472002048536257374972134231  (RLC fingerprint over the canonical field stream)
 */
